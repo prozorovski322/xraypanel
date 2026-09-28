@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package xray.app.stats.command;
+
+option go_package = "github.com/xraypanel/panel/internal/xray/app/stats/command;statscommand";
+
+// Stat is one counter. The name encodes what it counts, for users in the form
+// user>>>{email}>>>traffic>>>uplink, where email is the immutable stats key
+// (users.xray_email, ADR-007).
+message Stat {
+    string name = 1;
+    int64 value = 2;
+}
+
+message QueryStatsRequest {
+    // Pattern selects counters by prefix; "user>>>" is every user counter.
+    string pattern = 1;
+
+    // Reset zeroes each counter as it is read. The agent asks for false and computes
+    // deltas itself, because a counter the core forgets is traffic nobody can recover
+    // if the agent dies between reading and reporting (ADR-008).
+    bool reset = 2;
+}
+
+message QueryStatsResponse {
+    repeated Stat stat = 1;
+}
+
+message GetStatsRequest {
+    string name = 1;
+    bool reset = 2;
+}
+
+message GetStatsResponse {
+    Stat stat = 1;
+}
+
+// StatsService reads the core's counters. Only the two methods the agent needs are
+// declared; see ADR-065 on why this schema is transcribed rather than imported.
+service StatsService {
+    rpc QueryStats(QueryStatsRequest) returns (QueryStatsResponse);
+    rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}

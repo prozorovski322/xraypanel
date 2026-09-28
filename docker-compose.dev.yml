@@ -1,0 +1,45 @@
+# Development dependencies only. The panel itself runs from source via `make run`
+# so that a rebuild is a keystroke rather than an image build.
+#
+# Credentials here are fixed and weak on purpose: this file must never be used for
+# anything reachable from outside the machine. Production compose is separate.
+
+name: xraypanel-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: panel
+      POSTGRES_PASSWORD: panel
+      POSTGRES_DB: panel
+      # Deterministic collation, so ORDER BY in tests does not depend on the
+      # host locale.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      # Bound to loopback: a development database with a known password must not
+      # be reachable from the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    command:
+      # The panel stores every timestamp in UTC and keys traffic buckets by UTC
+      # hour. Pinning the server timezone keeps development identical to
+      # production regardless of the host clock.
+      - postgres
+      - -c
+      - timezone=UTC
+      - -c
+      - log_statement=none
+      - -c
+      - max_connections=100
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U panel -d panel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  postgres-data:

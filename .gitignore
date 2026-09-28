@@ -1,0 +1,38 @@
+# secrets / local env
+.env
+.env.*
+!.env.example
+
+# build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# node agent local state
+/var/
+*.bolt
+*.db
+
+# frontend
+node_modules/
+frontend/dist/
+.vite/
+frontend/test-results/
+frontend/playwright-report/
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# coverage
+coverage.out
+coverage.html
+
+.claude/launch.json
+frontend/node_modules/
+frontend/dist/
+bin/

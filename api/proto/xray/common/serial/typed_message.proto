@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+// This directory mirrors part of Xray-core's own wire contract, transcribed field
+// number for field number from the schema of the version the node image pins. It is
+// not a copy of the core's code and it is not a dependency on it: the core is
+// importable only as a Go module that brings in gvisor, wireguard, quic-go and utls,
+// which is a large surface to add to a control panel that proxies no traffic itself.
+// See ADR-065.
+//
+// The proto package names must match the core's exactly, because they decide the gRPC
+// method paths and the type strings inside TypedMessage. The directory layout matches
+// them in turn so that the origin of each message is obvious.
+package xray.common.serial;
+
+option go_package = "github.com/xraypanel/panel/internal/xray/common/serial;serial";
+
+// TypedMessage is Xray's own equivalent of google.protobuf.Any, and the reason this
+// file exists: the API takes operations and accounts wrapped in it.
+message TypedMessage {
+    // Type is the fully qualified protobuf message name, with no type.googleapis.com
+    // prefix. Getting this string wrong is the one mistake the wire format cannot
+    // catch for us, so every value the agent sends is built from a constant and
+    // exercised against a real core in the integration tests.
+    string type = 1;
+
+    // Value is the serialised message.
+    bytes value = 2;
+}

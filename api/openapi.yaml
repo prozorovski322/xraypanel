@@ -1,0 +1,1925 @@
+openapi: 3.0.3
+
+info:
+  title: xraypanel admin API
+  version: "0.6.0"
+  description: |
+    Control-plane API for the panel.
+
+    Two kinds of caller, both in `Authorization: Bearer <...>`, distinguished by the
+    shape of the value rather than by a separate header, so a caller cannot choose
+    which way it is validated:
+
+    - an **administrator** access token, checked by role;
+    - an **API key** (`xpk_<prefix>_<secret>`), checked by scope.
+
+    `:write` implies `:read` for the same resource. The `viewer` role is read-only.
+
+    ### Deliberately indistinguishable failures
+
+    A wrong password, a missing account and a disabled account all return
+    `401 invalid_credentials`. An incorrect and a replayed TOTP code both return
+    `401 invalid_code`. Each distinction would be a free oracle. The real reason is in
+    the panel's log, and every error body carries a `request_id` to find it by.
+
+    ### Retries
+
+    `POST /users` and `POST /users/{id}/renew` accept an `Idempotency-Key` header.
+    A retry with the same key and the same body replays the original response
+    byte-for-byte. The same key with a different body is `422`, because that is a client
+    bug and replaying the old answer would hide it while quietly not doing the new work.
+
+servers:
+  - url: /api/v1
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+  - name: users
+  - name: groups
+  - name: inbounds
+  - name: hosts
+  - name: reality-keys
+  - name: nodes
+  - name: api-keys
+  - name: webhooks
+  - name: audit
+  - name: stats
+  - name: subscription
+    description: Public, unauthenticated; the token in the path is the credential.
+  - name: health
+
+paths:
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in with a password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: |
+            Either a session, or a ticket when the account has 2FA. The refresh token is
+            not in the body: it is set as an httpOnly cookie scoped to `/api/v1/auth`.
+          headers:
+            Set-Cookie:
+              schema: { type: string }
+              description: "`xp_refresh`, httpOnly, SameSite=Strict"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyAttempts" }
+
+  /auth/login/mfa:
+    post:
+      tags: [auth]
+      summary: Complete a login with a TOTP code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfa_token, code]
+              properties:
+                mfa_token: { type: string }
+                code: { type: string, example: "123456" }
+      responses:
+        "200":
+          description: Session issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/TooManyAttempts" }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate the refresh token
+      security: []
+      description: |
+        Reads the refresh cookie and replaces it. Presenting a token that was already
+        rotated revokes every session from that login and invalidates its access tokens:
+        at that point the panel cannot tell the thief from the victim.
+      responses:
+        "200":
+          description: New session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LoginResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Cross-origin request rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: End this session
+      security: []
+      responses:
+        "204": { description: Signed out }
+
+  /auth/logout-all:
+    post:
+      tags: [auth]
+      summary: End every session for this administrator
+      responses:
+        "204": { description: Signed out everywhere }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Describe the current caller
+      responses:
+        "200":
+          description: The caller
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  kind: { type: string, enum: [admin, api_key] }
+                  username: { type: string }
+                  role: { type: string, enum: [superadmin, admin, viewer] }
+                  name: { type: string }
+                  scopes:
+                    type: array
+                    items: { type: string }
+                  totp_enabled:
+                    type: boolean
+                    description: Administrators only. Whether this account has a second factor.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/password:
+    post:
+      tags: [auth]
+      summary: Change the current administrator's password
+      description: Revokes every other session and invalidates outstanding access tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string, format: password }
+                new_password: { type: string, format: password, minLength: 12 }
+      responses:
+        "204": { description: Changed }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /auth/totp/enroll:
+    post:
+      tags: [auth]
+      summary: Begin 2FA enrolment
+      description: |
+        Stores a secret without switching 2FA on. It has to be confirmed with a code,
+        because enabling it immediately would lock out anyone whose authenticator failed
+        to add the entry, and recovering from that needs shell access to the server.
+      responses:
+        "200":
+          description: Secret and otpauth URI
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  uri: { type: string }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /auth/totp/confirm:
+    post:
+      tags: [auth]
+      summary: Turn 2FA on
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "204": { description: Enabled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /auth/totp/disable:
+    post:
+      tags: [auth]
+      summary: Turn 2FA off
+      description: |
+        Requires the current password. Without that, a hijacked session could quietly
+        remove the second factor and keep the account.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, format: password }
+      responses:
+        "204": { description: Disabled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api-keys:
+    get:
+      tags: [api-keys]
+      summary: List API keys
+      description: Includes revoked keys, for history. Secrets are never returned.
+      responses:
+        "200":
+          description: Keys
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/APIKey" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [api-keys]
+      summary: Mint an API key
+      description: |
+        The plaintext key is in this response and nowhere else: only its hash is stored.
+        A key with no scopes can do nothing, which is the safe default for a
+        half-finished request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                scopes:
+                  type: array
+                  items: { $ref: "#/components/schemas/Scope" }
+                expires_at: { type: string, format: date-time, nullable: true }
+      responses:
+        "201":
+          description: Created, with the plaintext key
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKeyCreated" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /api-keys/{id}:
+    delete:
+      tags: [api-keys]
+      summary: Revoke an API key
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Revoked }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /users:
+    get:
+      tags: [users]
+      summary: List subscribers
+      description: |
+        Credentials are never in a listing. One careless log of a list response should not
+        expose every subscription.
+      parameters:
+        - { name: search, in: query, schema: { type: string }, description: Matches username or note, case-insensitively }
+        - name: status
+          in: query
+          description: Repeatable
+          schema: { type: array, items: { $ref: "#/components/schemas/UserStatus" } }
+        - { name: group_id, in: query, schema: { type: integer, format: int64 } }
+        - { name: expiring_before, in: query, schema: { type: string, format: date-time } }
+        - { name: over_quota, in: query, schema: { type: boolean }, description: Users with no limit are never over quota }
+        - { name: has_telegram, in: query, schema: { type: boolean } }
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [id, username, status, traffic_used, traffic_limit, expires_at, created_at, online_at]
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc] } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 500 }, description: Values above the maximum are capped, not rejected }
+        - { name: offset, in: query, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: A page of subscribers
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [users]
+      summary: Create a subscriber
+      parameters: [{ $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username]
+              properties:
+                username: { type: string, maxLength: 64 }
+                traffic_limit: { type: integer, format: int64, default: 0, description: Bytes; 0 means unlimited }
+                reset_strategy: { $ref: "#/components/schemas/ResetStrategy" }
+                expires_at: { type: string, format: date-time, nullable: true }
+                note: { type: string }
+                telegram_id: { type: integer, format: int64, nullable: true }
+                group_ids:
+                  type: array
+                  items: { type: integer, format: int64 }
+                  description: Omitted or empty grants the default groups
+      responses:
+        "201":
+          description: Created, including the subscription token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /users/bulk/status:
+    post:
+      tags: [users]
+      summary: Change the status of several subscribers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids, status]
+              properties:
+                user_ids: { type: array, items: { type: integer, format: int64 } }
+                status: { $ref: "#/components/schemas/UserStatus" }
+      responses:
+        "200":
+          description: Count affected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  affected: { type: integer, format: int64 }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /users/{id}:
+    get:
+      tags: [users]
+      summary: Read one subscriber
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The subscriber
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [users]
+      summary: Change a subscriber
+      description: |
+        Only the fields present are changed. `expires_at` may be `null`, which clears the
+        expiry; omitting it leaves it alone.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username: { type: string }
+                status: { $ref: "#/components/schemas/UserStatus" }
+                traffic_limit: { type: integer, format: int64 }
+                reset_strategy: { $ref: "#/components/schemas/ResetStrategy" }
+                expires_at: { type: string, format: date-time, nullable: true }
+                note: { type: string }
+                telegram_id: { type: integer, format: int64, nullable: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      tags: [users]
+      summary: Delete a subscriber and their traffic history
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{id}/subscription:
+    get:
+      tags: [users]
+      summary: Resolve a subscriber's endpoints
+      description: The same resolution the public subscription endpoint uses.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: Links and quota
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscription_token: { type: string }
+                  links: { type: array, items: { type: string } }
+                  user_info: { type: string, description: The subscription-userinfo header value }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{id}/traffic:
+    get:
+      tags: [users]
+      summary: A user's daily traffic
+      description: |
+        Read from the daily rollup rather than the hourly ledger. The hourly rows are the
+        billing record and are pruned on a retention window; the daily ones are what a
+        chart is drawn from and what survives.
+
+        Both directions are reported separately because they are billed together but
+        diagnosed apart: a user whose uplink dwarfs their downlink is doing something
+        different from one who is watching video.
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/TrafficFrom" }
+        - { $ref: "#/components/parameters/TrafficTo" }
+      responses:
+        "200":
+          description: Daily traffic in the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrafficHistory" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{id}/renew:
+    post:
+      tags: [users]
+      summary: Extend a subscription
+      description: |
+        Added to the current expiry, or to now if it already lapsed. Adding to a past
+        expiry would hand back less time than was paid for. An expired or limited account
+        is reactivated; a deliberately disabled one is left alone, because that was an
+        operator decision rather than a billing state.
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [extend_by]
+              properties:
+                extend_by: { type: string, example: 720h, description: Go duration }
+                reset_traffic: { type: boolean, default: false }
+                traffic_limit: { type: integer, format: int64, nullable: true }
+      responses:
+        "200":
+          description: Renewed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /users/{id}/reset-traffic:
+    post:
+      tags: [users]
+      summary: Zero the usage counter
+      description: Reactivates an account that was limited; the lifetime total is untouched.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: Reset
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{id}/rotate-credentials:
+    post:
+      tags: [users]
+      summary: Issue new credentials and revoke the old subscription link
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: Rotated, including the new subscription token
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /users/{id}/groups:
+    put:
+      tags: [users]
+      summary: Replace a subscriber's access
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [group_ids]
+              properties:
+                group_ids: { type: array, items: { type: integer, format: int64 } }
+      responses:
+        "204": { description: Replaced }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups:
+    get:
+      tags: [groups]
+      summary: List access groups
+      responses:
+        "200":
+          description: Groups
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Group" } }
+    post:
+      tags: [groups]
+      summary: Create an access group
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+                description: { type: string }
+                is_default: { type: boolean, description: Granted automatically to new subscribers }
+                inbound_ids: { type: array, items: { type: integer, format: int64 } }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /groups/{id}:
+    get:
+      tags: [groups]
+      summary: Read one group with its members
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The group
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [groups]
+      summary: Change a group
+      description: Sending `inbound_ids` replaces the membership; omitting it leaves it alone.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string }
+                is_default: { type: boolean }
+                inbound_ids: { type: array, items: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Group" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [groups]
+      summary: Delete a group, revoking the access it granted
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /groups/{id}/users:
+    post:
+      tags: [groups]
+      summary: Grant a group to several subscribers
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids: { type: array, items: { type: integer, format: int64 } }
+      responses:
+        "200":
+          description: Count added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added: { type: integer, format: int64 }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /inbounds:
+    get:
+      tags: [inbounds]
+      summary: List inbounds
+      responses:
+        "200":
+          description: Inbounds
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Inbound" } }
+    post:
+      tags: [inbounds]
+      summary: Create an inbound
+      description: |
+        `flow` is only valid for `vless` over `tcp` with `tls` or `reality`; anywhere else
+        Xray rejects or ignores it, so it is refused here rather than producing a server
+        that starts and clients that fail.
+
+        Shadowsocks accepts only the `2022-*` methods: the older AEAD ciphers have no
+        per-user keys, so traffic on a multi-user inbound cannot be attributed and billing
+        is impossible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InboundCreate" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inbound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /inbounds/{id}:
+    get:
+      tags: [inbounds]
+      summary: Read one inbound
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The inbound
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inbound" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [inbounds]
+      summary: Change an inbound
+      description: |
+        A port change is checked against every node carrying this inbound, including ones
+        the caller is not looking at: two inbounds on one port mean Xray does not start at
+        all. `flow` may be `null` to clear it.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tag: { type: string }
+                listen_port: { type: integer, minimum: 1, maximum: 65535 }
+                listen_address: { type: string }
+                flow: { type: string, nullable: true }
+                network_settings: { type: object, additionalProperties: true }
+                tls_settings: { type: object, additionalProperties: true }
+                sniffing: { type: object, additionalProperties: true }
+                extra: { type: object, additionalProperties: true }
+                enabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Inbound" }
+        "409":
+          description: The new port is taken on a node carrying this inbound
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+    delete:
+      tags: [inbounds]
+      summary: Delete an inbound
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /inbounds/{id}/hosts:
+    get:
+      tags: [inbounds]
+      summary: List the hosts of one inbound
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: Hosts
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Host" } }
+
+  /hosts:
+    get:
+      tags: [hosts]
+      summary: List hosts
+      responses:
+        "200":
+          description: Hosts
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Host" } }
+    post:
+      tags: [hosts]
+      summary: Create a host
+      description: |
+        A host is how an inbound is presented to clients, which is frequently not how it is
+        configured locally: `address` can be a CDN hostname and `port` can differ from the
+        port Xray listens on. `remark` and `address` support `{USERNAME}`, `{NODE}` and
+        `{COUNTRY}`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Host" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /hosts/{id}:
+    get:
+      tags: [hosts]
+      summary: Read one host
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The host
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Host" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [hosts]
+      summary: Change a host
+      description: "`port` may be `null`, which goes back to inheriting the inbound's port."
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HostWrite" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Host" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [hosts]
+      summary: Delete a host
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /reality-keys:
+    get:
+      tags: [reality-keys]
+      summary: List Reality key sets
+      description: The private key is never returned.
+      responses:
+        "200":
+          description: Key sets
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/RealityKey" } }
+    post:
+      tags: [reality-keys]
+      summary: Generate a Reality key set
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, dest, server_names]
+              properties:
+                name: { type: string }
+                dest: { type: string, example: "www.cloudflare.com:443", description: host:port; a bare hostname is refused }
+                server_names: { type: array, items: { type: string } }
+                short_id_count: { type: integer, default: 4, minimum: 1, maximum: 64 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RealityKey" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /reality-keys/{id}:
+    delete:
+      tags: [reality-keys]
+      summary: Delete a Reality key set
+      description: Refused while an inbound still uses it.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /nodes:
+    get:
+      tags: [nodes]
+      summary: List nodes
+      responses:
+        "200":
+          description: Nodes
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Node" } }
+    post:
+      tags: [nodes]
+      summary: Register a node
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeWrite" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /nodes/{id}:
+    get:
+      tags: [nodes]
+      summary: Read one node
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The node
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [nodes]
+      summary: Change a node
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NodeWrite" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [nodes]
+      summary: Delete a node
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /nodes/{id}/inbounds:
+    get:
+      tags: [nodes]
+      summary: List the inbounds a node carries
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: Inbounds
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/Inbound" } }
+
+  /nodes/{id}/inbounds/{inboundID}:
+    put:
+      tags: [nodes]
+      summary: Put an inbound on a node
+      description: |
+        Refused with `409` if another inbound on that node already uses the same port.
+        Xray would not start at all, and from the panel that looks like a node that broke
+        by itself.
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/InboundID" }
+      responses:
+        "204": { description: Attached }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: Port already used on that node; the message names the other inbound
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [nodes]
+      summary: Take an inbound off a node
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/InboundID" }
+      responses:
+        "204": { description: Detached }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /nodes/{id}/config:
+    get:
+      tags: [nodes]
+      summary: Preview the configuration a node would receive
+      description: |
+        Behind `nodes:write` rather than `nodes:read`: the generated configuration carries
+        every user's credentials and the Reality private key.
+
+        Without this the only way to learn whether a configuration is valid is to deploy it
+        and see whether the node comes back.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The generated configuration and its hashes
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  structural_hash:
+                    type: string
+                    description: Changes only when something needing a core restart changed
+                  inbound_hashes:
+                    type: object
+                    additionalProperties: { type: string }
+                  config: { type: object, additionalProperties: true, description: The complete config.json the node would receive }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422":
+          description: Nothing to configure, or the configuration is invalid
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /nodes/{id}/connection:
+    get:
+      tags: [nodes]
+      summary: Whether a node's control stream is open right now
+      description: |
+        Distinct from the node's stored `status`, which is a durable record written when a
+        stream opens and closes. This reports what the panel process currently holds. The
+        two disagree exactly when something has gone wrong, which is when an operator is
+        looking.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: The live connection state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NodeConnection" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /nodes/{id}/traffic:
+    get:
+      tags: [nodes]
+      summary: A node's daily traffic
+      description: |
+        The same rollup as for a user, summed over the users a node served. Useful for
+        comparing what a node carried against what its provider billed for.
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - { $ref: "#/components/parameters/TrafficFrom" }
+        - { $ref: "#/components/parameters/TrafficTo" }
+      responses:
+        "200":
+          description: Daily traffic in the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrafficHistory" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /nodes/{id}/enrollment-tokens:
+    post:
+      tags: [nodes]
+      summary: Mint a single-use enrollment token for a node
+      description: |
+        Returns the token once; only its hash is stored. Behind `nodes:write` because
+        minting one is handing out a node's identity.
+
+        The response carries the certificate authority's public-key pin and the name the
+        node must require in the panel's certificate, not just the token. A node that
+        cannot verify the panel before sending its token would hand that token вЂ” and with
+        it every user credential the panel later sends that node вЂ” to whoever answers on
+        the address.
+
+        The lifetime is set by `NODE_ENROLLMENT_TTL` and is deliberately not a request
+        parameter: it is a property of the installation, not of the caller minting a
+        credential.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "201":
+          description: The token and what the node needs to verify the panel
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Enrollment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    get:
+      tags: [nodes]
+      summary: List a node's enrollment tokens
+      description: The secrets are not returned; a used token is kept as the record of an enrollment.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "200":
+          description: Tokens, newest first
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/EnrollmentToken" } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /nodes/{id}/enrollment-tokens/{tokenID}:
+    delete:
+      tags: [nodes]
+      summary: Revoke an unredeemed enrollment token
+      description: |
+        A redeemed token cannot be deleted: its `used_at` is the record of which
+        certificate came from where. Revoking a node's access is done by re-enrolling it or
+        disabling it, not by deleting the token it used.
+      parameters:
+        - { $ref: "#/components/parameters/ID" }
+        - name: tokenID
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "204": { description: Revoked }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pki/ca:
+    get:
+      tags: [nodes]
+      summary: The certificate authority nodes verify the panel against
+      description: |
+        Public material: this is what a node checks the panel with, not what it
+        authenticates with. Exposed so that an operator provisioning a node by hand, or
+        diagnosing one that will not connect, can compare pins without reading the
+        database.
+      responses:
+        "200":
+          description: The authority
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CertificateAuthority" }
+
+  /webhooks:
+    get:
+      tags: [webhooks]
+      summary: List webhook endpoints
+      description: |
+        Secrets are never listed. They are stored encrypted, and a listing that returned
+        them would make read access enough to forge deliveries.
+      responses:
+        "200":
+          description: Every endpoint
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [webhooks]
+      summary: Register a webhook endpoint
+      description: |
+        Deliveries are POSTed as JSON and signed:
+
+            X-Xraypanel-Timestamp: <unix seconds>
+            X-Xraypanel-Signature: sha256=hex(HMAC-SHA256(secret, timestamp + "." + body))
+
+        The timestamp is inside the signed content, so a receiver that rejects deliveries
+        more than a few minutes from its own clock cannot be replayed an old body under a
+        new timestamp. `X-Xraypanel-Delivery` is the same on every attempt at one delivery,
+        which is what a receiver deduplicates on.
+
+        Omit `secret` to have the panel generate one. It is returned in this response and
+        never again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEndpointCreate" }
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /webhooks/{id}:
+    patch:
+      tags: [webhooks]
+      summary: Change where an endpoint points or what it receives
+      description: |
+        The secret cannot be changed here. Rotating it is deleting the endpoint and creating
+        it again, which makes the moment the old one stops working explicit.
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEndpointUpdate" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WebhookEndpoint" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [webhooks]
+      summary: Remove an endpoint and its queued deliveries
+      parameters: [{ $ref: "#/components/parameters/ID" }]
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /audit:
+    get:
+      tags: [audit]
+      summary: Read the audit log, newest first
+      description: |
+        Paged by entry id rather than by offset: the log only grows and is read from the
+        top, and an offset page drifts by however many entries were written since the
+        previous one. Pass the previous page's `next_before` as `before`.
+      parameters:
+        - { name: before, in: query, schema: { type: integer, format: int64 }, description: Return entries older than this id }
+        - { name: entity_type, in: query, schema: { type: string }, description: For example user, node, inbound }
+        - { name: entity_id, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string }, description: For example user.limited }
+        - name: actor_type
+          in: query
+          schema: { type: string, enum: [admin, api_key, system, node] }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 200 } }
+      responses:
+        "200":
+          description: A page of entries
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /stats/summary:
+    get:
+      tags: [stats]
+      summary: Headline figures for the dashboard
+      description: |
+        Users and nodes by status, users online in the last few minutes, and traffic today
+        and this month. "Today" and "this month" start where billing periods do, in the
+        billing timezone; `since` says exactly where, so a dashboard in another timezone
+        does not have to guess.
+      responses:
+        "200":
+          description: The summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatsSummary" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /sub/{token}:
+    parameters:
+      - $ref: "#/components/parameters/SubscriptionToken"
+    get:
+      tags: [subscription]
+      summary: A client's subscription profile
+      operationId: getSubscription
+      security: []
+      servers: [{ url: / }]
+      description: |
+        Public: the token is the only credential. What goes into a client's "add
+        subscription" box.
+
+        The format follows the `User-Agent` (sing-box family в†’ `singbox`, Clash family в†’
+        `clash`, everything else в†’ `base64`), and `?format=` overrides it.
+
+        A user who is limited, expired or disabled gets `200` with **no endpoints** and the
+        quota header, so the client can show why its servers are gone. Unknown, malformed
+        and rotated tokens are all the same `404`.
+
+        Opened in a browser through the bundled Caddy (an `Accept` containing `text/html`
+        and no `format`), the same URL shows the subscription page instead; that decision
+        is Caddy's, and the panel itself always answers with a profile.
+
+        Rate-limited per client address (per `/64` for IPv6).
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [base64, links, v2ray, clash, mihomo, clash.meta, clashmeta, singbox, sing-box, sing_box, json]
+      responses:
+        "200":
+          description: The profile
+          headers:
+            Subscription-Userinfo:
+              description: "`upload=<bytes>; download=<bytes>; total=<bytes, 0 = unlimited>; expire=<unix, 0 = never>`"
+              schema: { type: string }
+            Profile-Update-Interval:
+              description: Hours between refreshes
+              schema: { type: integer }
+            Profile-Title:
+              description: Plain ASCII, or `base64:<utf-8 base64>`
+              schema: { type: string }
+            Content-Disposition:
+              description: Only for `clash` and `singbox`, naming the file
+              schema: { type: string }
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Base64 of newline-separated share links
+            text/yaml:
+              schema: { type: string, description: A Clash / mihomo profile }
+            application/json:
+              schema:
+                description: A sing-box profile, or with `?format=json` the panel's own structure
+                type: object
+                additionalProperties: true
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+    head:
+      tags: [subscription]
+      summary: The quota headers without the profile
+      operationId: headSubscription
+      security: []
+      servers: [{ url: / }]
+      description: Same headers as `GET`, no body. Does not count as a fetch.
+      responses:
+        "200": { description: Headers only }
+        "404": { description: Unknown token }
+        "429": { description: Rate limited }
+
+  /sub/{token}/info:
+    parameters:
+      - $ref: "#/components/parameters/SubscriptionToken"
+    get:
+      tags: [subscription]
+      summary: What the subscription page shows
+      operationId: getSubscriptionInfo
+      security: []
+      servers: [{ url: / }]
+      description: |
+        Status, quota and the individual links, for the public page. Does not count as a
+        fetch. `links` is empty unless `status` is `active`.
+      responses:
+        "200":
+          description: The summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PublicSubscription" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness
+      security: []
+      description: |
+        Does not touch the database on purpose. Liveness that depends on a dependency turns
+        a database blip into a restart loop, which makes an outage longer rather than
+        shorter.
+      servers: [{ url: / }]
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  version: { type: string }
+
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness
+      security: []
+      servers: [{ url: / }]
+      responses:
+        "200": { description: Ready }
+        "503":
+          description: The database is unreachable. The reason is logged, not returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  error: { type: string }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Either an administrator access token or an API key (`xpk_<prefix>_<secret>`).
+        Which one it is follows from the value's own shape.
+
+  parameters:
+    TrafficFrom:
+      name: from
+      in: query
+      required: false
+      description: First day of the window, as YYYY-MM-DD. Defaults to thirty days back.
+      schema: { type: string, format: date }
+    TrafficTo:
+      name: to
+      in: query
+      required: false
+      description: Last day of the window, as YYYY-MM-DD. Defaults to today.
+      schema: { type: string, format: date }
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    InboundID:
+      name: inboundID
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    SubscriptionToken:
+      name: token
+      in: path
+      required: true
+      description: The user's subscription token, as the admin API reports it in `subscription_token`
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema: { type: string }
+      description: |
+        A retry with the same key and the same body replays the original response
+        byte-for-byte. The same key with a different body is `422`.
+
+  responses:
+    BadRequest:
+      description: Malformed request
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthorized:
+      description: Not authenticated, or the credentials were refused
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated, but the credential lacks the capability
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: No such entity
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Conflicts with something that already exists
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unprocessable:
+      description: Understood and not acceptable
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyAttempts:
+      description: Throttled
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: This client asked too often
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    PublicSubscription:
+      type: object
+      required: [username, status, traffic_used, traffic_limit, reset_strategy, expires_at,
+                 profile_title, update_interval_hours, links]
+      properties:
+        username: { type: string }
+        status:
+          allOf: [{ $ref: "#/components/schemas/UserStatus" }]
+          description: |
+            Effective status: a limit or an expiry already reached counts even before the
+            enforcement worker has recorded it.
+        traffic_used: { type: integer, format: int64 }
+        traffic_limit: { type: integer, format: int64, description: "0 = unlimited" }
+        reset_strategy: { $ref: "#/components/schemas/ResetStrategy" }
+        expires_at: { type: string, format: date-time, nullable: true }
+        profile_title: { type: string }
+        update_interval_hours: { type: integer }
+        links:
+          type: array
+          items:
+            type: object
+            required: [remark, link]
+            properties:
+              remark: { type: string }
+              link: { type: string }
+    TrafficHistory:
+      type: object
+      required: [from, to, days, total_uplink, total_downlink]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        days:
+          type: array
+          items:
+            type: object
+            required: [day, uplink, downlink]
+            properties:
+              day: { type: string, format: date }
+              uplink: { type: integer, format: int64, description: Bytes from the client }
+              downlink: { type: integer, format: int64, description: Bytes to the client }
+        total_uplink: { type: integer, format: int64 }
+        total_downlink: { type: integer, format: int64 }
+    Error:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          enum:
+            - invalid_credentials
+            - invalid_code
+            - invalid_token
+            - too_many_attempts
+            - forbidden
+            - unauthorized
+            - bad_request
+            - conflict
+            - unprocessable
+            - not_found
+            - internal_error
+            - idempotency_mismatch
+            - idempotency_in_flight
+            - rate_limited
+        message:
+          type: string
+          description: Present only where the detail is safe to disclose
+        request_id:
+          type: string
+          description: Find the matching log line by this
+
+    Scope:
+      type: string
+      enum:
+        - users:read
+        - users:write
+        - nodes:read
+        - nodes:write
+        - inbounds:read
+        - inbounds:write
+        - stats:read
+        - admins:read
+        - admins:write
+        - audit:read
+        - webhooks:read
+        - webhooks:write
+
+    WebhookEvent:
+      type: string
+      enum: [user.created, user.limited, user.expired, user.renewed]
+
+    WebhookEndpoint:
+      type: object
+      required: [id, url, events, enabled, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        url: { type: string, format: uri }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/WebhookEvent" }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+        secret:
+          type: string
+          description: Present only in the answer to a create that let the panel generate it
+
+    WebhookEndpointCreate:
+      type: object
+      additionalProperties: false
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/WebhookEvent" }
+        secret:
+          type: string
+          description: Leave out to have one generated, which is the recommended way
+        enabled: { type: boolean, default: true }
+
+    WebhookEndpointUpdate:
+      type: object
+      additionalProperties: false
+      properties:
+        url: { type: string, format: uri }
+        events:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/WebhookEvent" }
+        enabled: { type: boolean }
+
+    AuditEntry:
+      type: object
+      required: [id, at, actor_type, actor_label, action, entity_type]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { type: string, format: date-time }
+        actor_type: { type: string, enum: [admin, api_key, system, node] }
+        actor_id: { type: integer, format: int64, nullable: true }
+        actor_label: { type: string }
+        action: { type: string }
+        entity_type: { type: string }
+        entity_id: { type: string, nullable: true }
+        ip: { type: string }
+        diff:
+          type: object
+          description: Before and after, with secret fields removed
+          additionalProperties: true
+
+    AuditPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/AuditEntry" }
+        next_before:
+          type: integer
+          format: int64
+          description: Absent on the last page
+
+    TrafficTotals:
+      type: object
+      required: [uplink, downlink, since]
+      properties:
+        uplink: { type: integer, format: int64 }
+        downlink: { type: integer, format: int64 }
+        since: { type: string, format: date-time }
+
+    StatsSummary:
+      type: object
+      required: [users, nodes, online_users, online_window_seconds, traffic_today, traffic_month]
+      properties:
+        users:
+          type: object
+          description: Count per user status
+          additionalProperties: { type: integer, format: int64 }
+        nodes:
+          type: object
+          description: Count per node status, with disabled nodes counted as disabled
+          additionalProperties: { type: integer, format: int64 }
+        online_users: { type: integer, format: int64 }
+        online_window_seconds: { type: integer, format: int64 }
+        traffic_today: { $ref: "#/components/schemas/TrafficTotals" }
+        traffic_month: { $ref: "#/components/schemas/TrafficTotals" }
+
+    UserStatus:
+      type: string
+      enum: [active, limited, expired, disabled]
+
+    ResetStrategy:
+      type: string
+      enum: [never, daily, weekly, monthly]
+
+    LoginResponse:
+      type: object
+      properties:
+        mfa_required: { type: boolean }
+        mfa_token: { type: string, description: Present only when mfa_required is true }
+        access_token: { type: string }
+        expires_at: { type: string, format: date-time }
+        username: { type: string }
+        role: { type: string }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        status: { $ref: "#/components/schemas/UserStatus" }
+        traffic_limit: { type: integer, format: int64, description: Bytes; 0 means unlimited }
+        traffic_used: { type: integer, format: int64, description: Bytes since the last reset }
+        traffic_lifetime: { type: integer, format: int64, description: Bytes ever, never reset }
+        reset_strategy: { $ref: "#/components/schemas/ResetStrategy" }
+        expires_at: { type: string, format: date-time }
+        note: { type: string }
+        telegram_id: { type: integer, format: int64 }
+        online_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        subscription_token:
+          type: string
+          description: Only on a single read, a create, or a rotation. Never in a listing.
+
+    UserPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/User"
+              - type: object
+                properties:
+                  sub_fetched_at: { type: string, format: date-time }
+                  group_count: { type: integer, format: int64 }
+        total: { type: integer, format: int64, description: Matches, not the page }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    Group:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        description: { type: string }
+        is_default: { type: boolean }
+        inbound_ids: { type: array, items: { type: integer, format: int64 } }
+        inbound_tags: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+
+    InboundCreate:
+      type: object
+      required: [tag, protocol, transport, security, listen_port]
+      properties:
+        tag: { type: string, description: "`api` is reserved for the local Xray API inbound" }
+        protocol: { type: string, enum: [vless, trojan, shadowsocks] }
+        transport: { type: string, enum: [tcp, ws, grpc, httpupgrade, xhttp] }
+        security: { type: string, enum: [none, tls, reality] }
+        listen_port: { type: integer, minimum: 1, maximum: 65535 }
+        listen_address: { type: string, default: 0.0.0.0 }
+        flow: { type: string, example: xtls-rprx-vision }
+        ss_method: { type: string, example: 2022-blake3-aes-128-gcm }
+        ss_server_key: { type: string, description: Write-only; stored encrypted and never returned }
+        network_settings: { type: object, additionalProperties: true }
+        tls_settings: { type: object, additionalProperties: true }
+        sniffing: { type: object, additionalProperties: true }
+        extra: { type: object, additionalProperties: true, description: Merged last into the generated inbound }
+        reality_key_id: { type: integer, format: int64 }
+        enabled: { type: boolean, default: true }
+
+    Inbound:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        tag: { type: string }
+        protocol: { type: string }
+        transport: { type: string }
+        security: { type: string }
+        listen_port: { type: integer }
+        listen_address: { type: string }
+        flow: { type: string }
+        ss_method: { type: string }
+        network_settings: { type: object, additionalProperties: true }
+        tls_settings: { type: object, additionalProperties: true }
+        sniffing: { type: object, additionalProperties: true }
+        extra: { type: object, additionalProperties: true }
+        reality_key_id: { type: integer, format: int64 }
+        enabled: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    HostWrite:
+      type: object
+      properties:
+        inbound_id: { type: integer, format: int64 }
+        remark: { type: string, description: "Supports {USERNAME}, {NODE}, {COUNTRY}" }
+        address: { type: string, description: Same placeholders as remark }
+        port: { type: integer, nullable: true, description: Null inherits the inbound's port }
+        sni: { type: string }
+        host_header: { type: string }
+        path: { type: string }
+        fingerprint:
+          type: string
+          enum: [chrome, firefox, safari, ios, android, edge, "360", qq, random, randomized]
+        alpn: { type: string, example: "h2,http/1.1" }
+        allow_insecure: { type: boolean }
+        sort_order: { type: integer }
+        enabled: { type: boolean }
+
+    Host:
+      allOf:
+        - $ref: "#/components/schemas/HostWrite"
+        - type: object
+          properties:
+            id: { type: integer, format: int64 }
+
+    RealityKey:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        public_key: { type: string }
+        short_ids: { type: array, items: { type: string } }
+        dest: { type: string }
+        server_names: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+
+    NodeWrite:
+      type: object
+      properties:
+        name: { type: string }
+        address: { type: string, description: Default connection address offered to clients }
+        country_code: { type: string, minLength: 2, maxLength: 2 }
+        tag: { type: string }
+        config_patch:
+          type: object
+          additionalProperties: true
+          description: |
+            RFC 7386 merge patch applied to the generated configuration. The only supported
+            way to make one node differ from another. A `null` value removes a key.
+        enabled: { type: boolean, default: true }
+
+    Node:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        address: { type: string }
+        country_code: { type: string }
+        tag: { type: string }
+        status: { type: string, enum: [connected, disconnected, disabled, error] }
+        xray_version: { type: string }
+        agent_version: { type: string }
+        config_patch: { type: object, additionalProperties: true }
+        config_version: { type: integer, format: int64, description: What the panel wants applied }
+        applied_version: { type: integer, format: int64, description: What the node reported }
+        last_error: { type: string }
+        traffic_used: { type: integer, format: int64 }
+        enabled: { type: boolean }
+        last_seen_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+
+    NodeConnection:
+      type: object
+      properties:
+        node_id: { type: integer, format: int64 }
+        connected:
+          type: boolean
+          description: Whether this panel process currently holds the node's control stream
+        remote_addr: { type: string }
+        connected_at: { type: string, format: date-time }
+        last_heartbeat: { type: string, format: date-time }
+        agent_version: { type: string }
+        xray_version: { type: string }
+        applied_version: { type: integer, format: int64 }
+        xray_running:
+          type: boolean
+          description: |
+            False when the node is connected and its Xray child process is not healthy,
+            which is a node that is reachable and serving nobody.
+
+    Enrollment:
+      type: object
+      description: Returned once, when a token is minted. All three of token, pin and server name are needed to join.
+      properties:
+        token_id: { type: integer, format: int64 }
+        node_id: { type: integer, format: int64 }
+        token:
+          type: string
+          description: Shown once and never again; the panel stores only its hash
+        ca_pin:
+          type: string
+          description: |
+            SHA-256 of the authority's SubjectPublicKeyInfo, lowercase hex. The node
+            requires the panel's chain to terminate in an authority matching this, which is
+            what makes the first connection safe before the node holds the authority itself.
+        server_name:
+          type: string
+          description: |
+            The name the node requires in the panel's certificate, regardless of the
+            address it dials. Fixed, so that moving the panel needs no certificate work.
+        expires_at: { type: string, format: date-time }
+
+    EnrollmentToken:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        node_id: { type: integer, format: int64 }
+        expires_at: { type: string, format: date-time }
+        used_at:
+          type: string
+          format: date-time
+          description: Set once redeemed. A redeemed token cannot be reused or deleted.
+        created_at: { type: string, format: date-time }
+
+    CertificateAuthority:
+      type: object
+      properties:
+        pin: { type: string, description: SHA-256 of the authority's public key, lowercase hex }
+        server_name: { type: string }
+        not_after: { type: string, format: date-time }
+        certificate_pem: { type: string }
+
+    APIKey:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        prefix: { type: string, description: Public fragment, for identifying a leaked key }
+        scopes: { type: array, items: { $ref: "#/components/schemas/Scope" } }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+
+    APIKeyCreated:
+      allOf:
+        - $ref: "#/components/schemas/APIKey"
+        - type: object
+          properties:
+            key:
+              type: string
+              description: The plaintext key, returned exactly once

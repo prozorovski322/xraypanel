@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package xray.common.protocol;
+
+import "xray/common/serial/typed_message.proto";
+
+option go_package = "github.com/xraypanel/panel/internal/xray/common/protocol;protocol";
+
+// User is one account on one inbound.
+message User {
+    // Level selects the policy that applies. The panel generates policy.levels.0 with
+    // the per-user traffic counters enabled, so every user it creates is level 0 —
+    // a user at another level would silently stop being billed.
+    uint32 level = 1;
+
+    // Email is the stats key, not an address. Xray reports traffic under
+    // user>>>{email}>>>traffic>>>uplink, which is what the billing pipeline joins on.
+    string email = 2;
+
+    // Account is the protocol-specific credential, wrapped in a TypedMessage.
+    xray.common.serial.TypedMessage account = 3;
+}

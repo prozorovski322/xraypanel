@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package xray.proxy.vless;
+
+option go_package = "github.com/xraypanel/panel/internal/xray/proxy/vless;vless";
+
+// Account is a VLESS credential.
+//
+// Only the fields the panel sets are declared; the core's message has more, and an
+// absent proto3 field is simply its zero value on the wire, so a partial transcription
+// is a valid message rather than a truncated one.
+message Account {
+    // Id is the user's UUID.
+    string id = 1;
+
+    // Flow is the XTLS flow, in practice xtls-rprx-vision, and must match the flow the
+    // inbound was generated with: a user added with the wrong flow authenticates and
+    // then fails to carry traffic.
+    string flow = 2;
+
+    // Encryption is required by the protocol and "none" is its only accepted value:
+    // VLESS carries no encryption of its own, the transport security layer does.
+    string encryption = 3;
+}

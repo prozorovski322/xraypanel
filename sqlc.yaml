@@ -1,0 +1,35 @@
+version: "2"
+
+sql:
+  - engine: postgresql
+    schema: internal/postgres/migrations
+    queries: internal/postgres/queries
+    gen:
+      go:
+        package: dbgen
+        out: internal/postgres/gen
+        sql_package: pgx/v5
+
+        # Emit an interface so services can be tested against a fake, and run
+        # against a real pool in integration tests.
+        emit_interface: true
+        emit_json_tags: false
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true
+        emit_prepared_queries: false
+
+        # Only timestamps are overridden. Nullable timestamptz otherwise arrives as
+        # a pgtype wrapper that every call site has to unwrap, and expires_at /
+        # revoked_at / last_reset_at are nullable all over this schema.
+        #
+        # uuid and inet are deliberately left at the defaults: mapping them to
+        # google/uuid or net.IP requires registering the type with pgx, and a
+        # mismatch there fails at runtime rather than at generation.
+        overrides:
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true

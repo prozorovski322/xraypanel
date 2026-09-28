@@ -1,0 +1,100 @@
+{
+  "api": {
+    "services": [
+      "HandlerService",
+      "StatsService",
+      "LoggerService"
+    ],
+    "tag": "api"
+  },
+  "inbounds": [
+    {
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1"
+      },
+      "tag": "api"
+    },
+    {
+      "listen": "0.0.0.0",
+      "port": 9443,
+      "protocol": "trojan",
+      "settings": {
+        "clients": [
+          {
+            "email": "k3m9qp2wxd7f",
+            "level": 0,
+            "password": "trojan-secret-one"
+          },
+          {
+            "email": "q7w2e9r4t6y8",
+            "level": 0,
+            "password": "trojan-secret-two"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "tls",
+        "tlsSettings": {
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ],
+          "certificates": [
+            {
+              "certificateFile": "/etc/xray/cert.pem",
+              "keyFile": "/etc/xray/key.pem"
+            }
+          ],
+          "minVersion": "1.2"
+        },
+        "wsSettings": {
+          "host": "cdn.example.com",
+          "path": "/tj"
+        }
+      },
+      "tag": "trojan-ws"
+    }
+  ],
+  "log": {
+    "loglevel": "warning"
+  },
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked"
+    }
+  ],
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserDownlink": true,
+        "statsUserUplink": true
+      }
+    },
+    "system": {
+      "statsInboundDownlink": true,
+      "statsInboundUplink": true
+    }
+  },
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "inboundTag": [
+          "api"
+        ],
+        "outboundTag": "api",
+        "type": "field"
+      }
+    ]
+  },
+  "stats": {}
+}

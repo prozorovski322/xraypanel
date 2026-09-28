@@ -1,0 +1,16 @@
+# Code generation for the node control protocol.
+#
+# The plugins are invoked through `go run <module>@<version>` rather than expected
+# on PATH. That pins the generator the same way go.mod pins a library, so the
+# committed output cannot silently change with whatever a developer happens to
+# have installed, and `make proto` needs nothing beyond a Go toolchain.
+version: v2
+
+plugins:
+  - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12"]
+    out: internal
+    opt: paths=source_relative
+
+  - local: ["go", "run", "google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2"]
+    out: internal
+    opt: paths=source_relative

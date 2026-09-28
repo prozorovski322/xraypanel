@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package xray.app.proxyman.command;
+
+import "xray/common/protocol/user.proto";
+import "xray/common/serial/typed_message.proto";
+
+option go_package = "github.com/xraypanel/panel/internal/xray/app/proxyman/command;command";
+
+// AddUserOperation adds one user to a running inbound.
+message AddUserOperation {
+    xray.common.protocol.User user = 1;
+}
+
+// RemoveUserOperation removes a user by stats key.
+message RemoveUserOperation {
+    string email = 1;
+}
+
+message AlterInboundRequest {
+    // Tag names the inbound, and matches the tag the panel generated.
+    string tag = 1;
+
+    // Operation is an AddUserOperation or a RemoveUserOperation.
+    xray.common.serial.TypedMessage operation = 2;
+}
+
+message AlterInboundResponse {}
+
+message RemoveInboundRequest {
+    string tag = 1;
+}
+
+message RemoveInboundResponse {}
+
+message GetInboundUserRequest {
+    string tag = 1;
+
+    // Email empty means every user on the inbound.
+    string email = 2;
+}
+
+message GetInboundUserResponse {
+    repeated xray.common.protocol.User users = 1;
+}
+
+// HandlerService is the core's runtime management API.
+//
+// Only the methods the agent uses are declared. AddInbound is deliberately absent:
+// it takes a fully built core.InboundHandlerConfig, which would mean transcribing the
+// core's internal transport, TLS and Reality configuration messages — several hundred
+// lines that change between core versions. Adding an inbound therefore restarts the
+// core instead (ADR-065). Removing one needs nothing but a tag, so that stays online.
+service HandlerService {
+    rpc AlterInbound(AlterInboundRequest) returns (AlterInboundResponse);
+    rpc RemoveInbound(RemoveInboundRequest) returns (RemoveInboundResponse);
+    rpc GetInboundUsers(GetInboundUserRequest) returns (GetInboundUserResponse);
+}

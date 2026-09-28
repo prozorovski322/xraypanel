@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package xray.proxy.shadowsocks_2022;
+
+// The import path follows the directory, which follows the proto package; the Go
+// package is named without the underscore because Go packages are not spelled that way.
+option go_package = "github.com/xraypanel/panel/internal/xray/proxy/shadowsocks_2022;ss2022";
+
+// Account is a Shadowsocks-2022 credential: the user's own pre-shared key.
+//
+// The panel only generates 2022-* methods, which are the ones with per-user keys, so
+// this is the only Shadowsocks account shape the agent ever sends. The older AEAD
+// ciphers have a single shared password and cannot attribute traffic to a user at all.
+message Account {
+    string key = 1;
+}

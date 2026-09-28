@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+package xray.proxy.trojan;
+
+option go_package = "github.com/xraypanel/panel/internal/xray/proxy/trojan;trojan";
+
+// Account is a Trojan credential.
+message Account {
+    string password = 1;
+}

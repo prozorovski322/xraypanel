@@ -1,0 +1,20 @@
+# Buf workspace. The schema lives under api/proto and the generated Go code is
+# committed, exactly as the sqlc output is: a normal build and CI need no code
+# generator installed, and a change to the schema shows up as a reviewable diff.
+version: v2
+
+modules:
+  - path: api/proto
+
+# BASIC rather than STANDARD. STANDARD additionally requires a "Service" suffix on
+# every service and a Request/Response pair named after each RPC. Neither fits a
+# single bidirectional stream whose two directions are NodeMessage and
+# PanelMessage: renaming them to ControlRequest and ControlResponse would hide
+# which side sends which. The rules that catch real mistakes are all in BASIC.
+lint:
+  use:
+    - BASIC
+
+breaking:
+  use:
+    - FILE

@@ -1,0 +1,70 @@
+# Caddy in front of the panel: TLS with automatic ACME, the static UI, and the proxy.
+#
+# PANEL_DOMAIN must resolve to this host before the first start: Caddy obtains the
+# certificate on its own, answering the ACME challenge on ports 80 and 443 here.
+#
+# Access logging is deliberately not enabled. The subscription URL carries its token in the
+# path, and a log of request URIs would be a list of every subscriber's credential. The
+# panel logs requests itself, with the token cut out.
+#
+# The four handle blocks below match disjoint paths, so their order does not matter; Caddy
+# tries the more specific paths first and the bare one last.
+
+{$PANEL_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		# The subscription page has a credential in its URL. Nothing leaves in a Referer.
+		Referrer-Policy "no-referrer"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	handle /api/* {
+		reverse_proxy panel:8080
+	}
+
+	# /sub/{token}: a browser opening the link gets the subscription page; a client, curl,
+	# or the page's own request for /info gets the panel. "A browser" is a request for
+	# exactly /sub/{token} that accepts HTML and names no ?format= — the same rule as the
+	# dev server in frontend/vite.config.ts.
+	handle /sub/* {
+		@page {
+			path_regexp ^/sub/[^/]+/?$
+			header Accept *text/html*
+			not query format=*
+		}
+		handle @page {
+			root * /srv
+			rewrite * /sub.html
+			header Cache-Control "no-store"
+			header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+			file_server
+		}
+		handle {
+			reverse_proxy panel:8080
+		}
+	}
+
+	# Hashed file names never change content, so they may be cached for good.
+	handle /assets/* {
+		root * /srv
+		header Cache-Control "public, max-age=31536000, immutable"
+		file_server
+	}
+
+	# Everything else is the admin UI: files that exist are served, any other path is one of
+	# the single-page app's routes and gets index.html. Never cached, or a deploy stays
+	# invisible until the cache expires.
+	handle {
+		root * /srv
+		header Cache-Control "no-cache"
+		# Inline styles are allowed for the dialog library's scroll lock, which injects a
+		# style element. Scripts stay strictly same-origin.
+		header Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		try_files {path} /index.html
+		file_server
+	}
+}

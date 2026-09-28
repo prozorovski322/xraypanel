@@ -1,0 +1,47 @@
+# One exit node. This file is what an operator copies onto a fresh server.
+#
+# network_mode: host is not an optimisation here, it is the point. A node's inbounds are
+# reached directly by clients on whatever ports the panel configures, Reality needs the
+# real source address to behave, and port mapping every inbound would mean editing this
+# file every time an inbound changes.
+
+name: xraypanel-node
+
+services:
+  node:
+    image: ghcr.io/xraypanel/node:latest
+    restart: unless-stopped
+
+    # The agent is PID 1 and xray is its child, so the container has exactly one thing to
+    # supervise and stopping it stops both.
+    network_mode: host
+
+    environment:
+      # All three values come from the panel when an operator mints an enrollment token:
+      #   POST /api/v1/nodes/{id}/enrollment-tokens
+      NODE_PANEL_ADDR: "panel.example.com:8443"
+      NODE_CA_PIN: ""
+      # Needed only until this node is enrolled. It is single-use; leaving it set
+      # afterwards does nothing, and removing it is tidier.
+      NODE_ENROLLMENT_TOKEN: ""
+
+      NODE_LOG_LEVEL: "info"
+      NODE_LOG_FORMAT: "json"
+
+    volumes:
+      # Identity, the configuration the panel sent, and the local cache. Losing this
+      # volume means enrolling the node again.
+      - node-state:/var/lib/xraypanel-node
+
+    # The agent stops xray on SIGTERM and then exits. The default ten seconds is not
+    # always enough for a core with open connections to close them.
+    stop_grace_period: 30s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  node-state:

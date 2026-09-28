@@ -1,0 +1,492 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  # The admin UI's toolchain. The same major the UI was developed against.
+  NODE_VERSION: "24"
+  # Pinned: the config generator is validated against this exact binary, so raising
+  # the version is a deliberate change whose effect the tests will show.
+  XRAY_VERSION: "v26.3.27"
+  # Subscription profiles are validated against these exact clients, for the same
+  # reason: documentation lags, and only the binary confirms a schema.
+  SINGBOX_VERSION: "1.14.2"
+  MIHOMO_VERSION: "v1.19.31"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # A .proto edited without regenerating still builds and still passes every test:
+      # the committed Go code is simply the old contract. The mismatch would surface on
+      # whoever next touched the package, or on a node talking to a panel that disagrees
+      # about the wire format.
+      - name: Protocol code matches the schema
+        run: make proto-check
+
+      # Golden files prove the generator is stable; only the real binary proves its
+      # output is a config Xray will accept. Without this the first sign of a bad
+      # config would be a node that refuses to start.
+      - name: Install Xray for config validation
+        run: |
+          set -euo pipefail
+          base="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}"
+          curl -fsSL -o xray.zip "${base}/Xray-linux-64.zip"
+          curl -fsSL -o xray.zip.dgst "${base}/Xray-linux-64.zip.dgst"
+
+          # Verify against the digest the release publishes before running anything.
+          local_sum=$(sha256sum xray.zip | awk '{print $1}')
+          if ! grep -qi "$local_sum" xray.zip.dgst; then
+            echo "checksum mismatch for Xray ${XRAY_VERSION}"
+            echo "expected one of:"; cat xray.zip.dgst
+            echo "got: $local_sum"
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/xray"
+          unzip -q xray.zip -d "${RUNNER_TEMP}/xray"
+          chmod +x "${RUNNER_TEMP}/xray/xray"
+          echo "XRAY_BINARY=${RUNNER_TEMP}/xray/xray" >> "$GITHUB_ENV"
+          "${RUNNER_TEMP}/xray/xray" version
+
+      # A profile can look perfectly reasonable and be rejected by the client that has
+      # to load it, which the user sees as an unexplained import failure.
+      - name: Install sing-box and mihomo for profile validation
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -o sing-box.tar.gz \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/sing-box"
+          tar -xzf sing-box.tar.gz -C "${RUNNER_TEMP}/sing-box" --strip-components=1
+          echo "SINGBOX_BINARY=${RUNNER_TEMP}/sing-box/sing-box" >> "$GITHUB_ENV"
+          "${RUNNER_TEMP}/sing-box/sing-box" version
+
+          curl -fsSL -o mihomo.gz \
+            "https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+          gunzip -c mihomo.gz > "${RUNNER_TEMP}/mihomo"
+          chmod +x "${RUNNER_TEMP}/mihomo"
+          echo "MIHOMO_BINARY=${RUNNER_TEMP}/mihomo" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: go test -race -shuffle=on ./...
+
+      - name: Build
+        run: make build
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Pinned here rather than in the Makefile: the config schema differs between
+      # v1 and v2, so the version that reads .golangci.yml is fixed in one place.
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+
+  frontend:
+    name: admin UI builds
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # npm ci, not install: it refuses a lockfile that does not match package.json and
+      # checks every package against the integrity hash recorded in it.
+      - name: Install
+        run: npm ci
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+
+      # The client types are generated from api/openapi.yaml and committed. A contract change
+      # without regenerating would still type-check — against the old contract.
+      - name: API types match the contract
+        run: |
+          npm run api
+          git diff --exit-code src/api/schema.d.ts
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build
+        run: npx vite build
+
+  frontend-e2e:
+    name: admin UI smoke test
+    runs-on: ubuntu-latest
+    needs: [frontend]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: panel
+          POSTGRES_PASSWORD: panel
+          POSTGRES_DB: panel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U panel -d panel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://panel:panel@localhost:5432/panel?sslmode=disable
+      PANEL_SECRET_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      BOOTSTRAP_ADMIN_USERNAME: e2e-admin
+      # A throwaway credential for a throwaway database on a throwaway runner.
+      BOOTSTRAP_ADMIN_PASSWORD: e2e-correct-horse-battery
+      E2E_USERNAME: e2e-admin
+      E2E_PASSWORD: e2e-correct-horse-battery
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Start the panel
+        run: |
+          go build -o panel ./cmd/panel
+          ./panel migrate
+          ./panel serve > panel.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/readyz && exit 0
+            sleep 1
+          done
+          echo "the panel did not become ready"; cat panel.log; exit 1
+
+      - name: Install and build the UI
+        working-directory: frontend
+        run: |
+          npm ci
+          npx vite build
+
+      # Browsers are installed here, on the runner, and nowhere else.
+      - name: Install Chromium for Playwright
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Smoke test
+        working-directory: frontend
+        run: npx playwright test
+
+      - name: Keep the report and the panel log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-ui-e2e
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+            panel.log
+
+  node-image:
+    name: node image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Dockerfile is otherwise exercised by nobody until an operator tries to
+      # deploy a node, which is the worst moment to discover it does not build. The
+      # build also verifies the Xray download against its published digest, so a
+      # tampered or moved release fails here rather than on a node.
+      - name: Build the node image
+        run: |
+          docker build \
+            -f deploy/node.Dockerfile \
+            --build-arg XRAY_VERSION=${XRAY_VERSION} \
+            --build-arg VERSION=${GITHUB_SHA::7} \
+            --build-arg COMMIT=${GITHUB_SHA} \
+            -t xraypanel-node:ci .
+
+      # The agent has to be able to start and print its own version: an image whose
+      # entrypoint is broken would otherwise pass a build-only check.
+      - name: The image runs
+        run: docker run --rm xraypanel-node:ci version
+
+      # And the core it ships has to be the pinned one.
+      - name: The image carries the pinned xray
+        run: |
+          set -euo pipefail
+          reported=$(docker run --rm --entrypoint /usr/local/bin/xray xraypanel-node:ci version | head -n1)
+          echo "$reported"
+          expected="${XRAY_VERSION#v}"
+          if ! echo "$reported" | grep -q "$expected"; then
+            echo "the image reports $reported, expected Xray $expected"
+            exit 1
+          fi
+
+  # The production stack as an operator runs it: the three images built from this commit,
+  # started with deploy/docker-compose.yml, and driven from outside through Caddy. It is the
+  # only check that the Dockerfiles, the Caddyfile and the compose file agree with each other
+  # and with the panel, which none of them can establish on its own.
+  stack:
+    name: production stack starts and serves
+    runs-on: ubuntu-latest
+    env:
+      XRAYPANEL_VERSION: ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the images
+        run: |
+          set -euo pipefail
+          for image in panel web backup; do
+            docker build -f "deploy/${image}.Dockerfile" \
+              --build-arg VERSION=${GITHUB_SHA::7} --build-arg COMMIT=${GITHUB_SHA} \
+              -t "ghcr.io/xraypanel/${image}:${XRAYPANEL_VERSION}" .
+          done
+
+      - name: Start the stack
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          # localhost makes Caddy issue from its own internal CA instead of asking Let's
+          # Encrypt; everything else is the production configuration.
+          cat > .env <<EOF
+          PANEL_DOMAIN=localhost
+          XRAYPANEL_VERSION=${XRAYPANEL_VERSION}
+          POSTGRES_PASSWORD=$(openssl rand -hex 24)
+          PANEL_SECRET_KEY=$(openssl rand -hex 32)
+          BOOTSTRAP_ADMIN_USERNAME=ci-admin
+          BOOTSTRAP_ADMIN_PASSWORD=ci-correct-horse-battery
+          BACKUP_INTERVAL=1h
+          BACKUP_MAX_AGE=24h
+          EOF
+          docker compose up -d
+          for i in $(seq 1 90); do
+            if curl -ksf https://localhost/ >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          echo "the stack did not come up"; docker compose ps; exit 1
+
+      - name: Smoke test through Caddy
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          base=https://localhost
+          curl -ksf "$base/" | grep -q '<div id="root">'
+
+          token=$(curl -ksf -X POST "$base/api/v1/auth/login" -H 'content-type: application/json' \
+            -d '{"username":"ci-admin","password":"ci-correct-horse-battery"}' | jq -r .access_token)
+          auth="authorization: Bearer $token"
+          id=$(curl -ksf -X POST "$base/api/v1/users" -H "$auth" -H 'content-type: application/json' \
+            -d '{"username":"ci-user"}' | jq -r .id)
+          sub=$(curl -ksf "$base/api/v1/users/$id/subscription" -H "$auth" | jq -r .subscription_token)
+
+          echo "a client gets a profile from the panel"
+          curl -ksfi -A 'v2rayNG/1.10.2' "$base/sub/$sub" | grep -qi '^subscription-userinfo:'
+          echo "a browser gets the subscription page from Caddy"
+          curl -ksf -H 'accept: text/html' "$base/sub/$sub" | grep -q '/assets/sub-'
+          echo "an explicit format beats the browser rule"
+          curl -ksfi -H 'accept: text/html' "$base/sub/$sub?format=clash" | grep -qi '^content-type: text/yaml'
+          echo "the page's data comes from the panel"
+          curl -ksf -H 'accept: application/json' "$base/sub/$sub/info" | jq -e '.username == "ci-user"'
+          echo "an unknown token is a 404"
+          test "$(curl -ks -o /dev/null -w '%{http_code}' "$base/sub/aaaaaaaaaaaaaaaaaaaaaa")" = 404
+          echo "the panel's own HTTP port is not published"
+          if curl -sf --max-time 3 http://localhost:8080/healthz; then
+            echo "port 8080 answers from outside the compose network"; exit 1
+          fi
+
+      - name: Backups are taken, verified, and restore
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          # The first backup runs as the service starts.
+          for i in $(seq 1 60); do
+            if docker compose exec -T backup backup health; then break; fi
+            sleep 2
+          done
+          docker compose exec -T backup backup list
+          file=$(docker compose exec -T backup backup list | awk 'NR==2 {print $1}')
+          docker compose exec -T backup backup verify "$file"
+          docker compose exec -T backup backup restore "$file" panel_restored
+
+          # The restored database is current, and holds what was written before the dump.
+          password=$(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)
+          status=$(docker compose run --rm -T \
+            -e DATABASE_URL="postgres://panel:${password}@postgres:5432/panel_restored?sslmode=disable" \
+            migrate migrate-status)
+          echo "$status"
+          if echo "$status" | grep -qi pending; then echo "the restored schema has pending migrations"; exit 1; fi
+          docker compose exec -T postgres psql -U panel -d panel_restored -tAc \
+            "SELECT username FROM users" | grep -qx ci-user
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: deploy
+        run: docker compose logs --no-color
+
+  migrate:
+    name: migrations apply to a clean database
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: panel
+          POSTGRES_PASSWORD: panel
+          POSTGRES_DB: panel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U panel -d panel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://panel:panel@localhost:5432/panel?sslmode=disable
+      PANEL_SECRET_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Apply migrations
+        run: go run ./cmd/panel migrate
+
+      - name: Show status
+        run: go run ./cmd/panel migrate-status
+
+      # Applying twice must be a no-op. This catches a migration that is not
+      # idempotent at the goose level, which would otherwise only surface on a
+      # redeploy against a database that is already up to date.
+      - name: Apply again is a no-op
+        run: go run ./cmd/panel migrate
+
+      - name: No migrations left pending
+        run: |
+          if go run ./cmd/panel migrate-status | grep -qi "pending"; then
+            echo "unexpected pending migrations after migrate"
+            exit 1
+          fi
+
+      # Duplicated from the build job on purpose rather than shared through an action.
+      # The end-to-end agent tests run a real xray-core, and without it here they skip —
+      # which is worse than not having them, because the suite still reports success.
+      - name: Install Xray for the end-to-end agent tests
+        run: |
+          set -euo pipefail
+          base="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}"
+          curl -fsSL -o xray.zip "${base}/Xray-linux-64.zip"
+          curl -fsSL -o xray.zip.dgst "${base}/Xray-linux-64.zip.dgst"
+
+          local_sum=$(sha256sum xray.zip | awk '{print $1}')
+          if ! grep -qi "$local_sum" xray.zip.dgst; then
+            echo "checksum mismatch for Xray ${XRAY_VERSION}"
+            exit 1
+          fi
+
+          mkdir -p "${RUNNER_TEMP}/xray"
+          unzip -q xray.zip -d "${RUNNER_TEMP}/xray"
+          chmod +x "${RUNNER_TEMP}/xray/xray"
+          echo "XRAY_BINARY=${RUNNER_TEMP}/xray/xray" >> "$GITHUB_ENV"
+
+      - name: Integration tests
+        env:
+          TEST_DATABASE_URL: postgres://panel:panel@localhost:5432/panel_integration?sslmode=disable
+          # The backup tests run the real pg_dump and pg_restore. The runner image carries
+          # PostgreSQL 16, the service's major version; pinned by path so that a newer client
+          # on PATH cannot make the test pass with tools production does not use.
+          PG_BIN: /usr/lib/postgresql/16/bin
+        run: |
+          # A separate database from the migration checks above, so the suite's
+          # TRUNCATE calls cannot interfere with them.
+          PGPASSWORD=panel createdb -h localhost -U panel panel_integration
+          # -shuffle catches a test that only passes in one order, which for a suite
+          # sharing a database is an easy mistake to make.
+          go test -race -tags=integration -count=1 -shuffle=on -timeout 15m ./test/integration/...
+
+      - name: Sanity-check the schema
+        run: |
+          PGPASSWORD=panel psql -h localhost -U panel -d panel -v ON_ERROR_STOP=1 <<'SQL'
+          -- The partitioned traffic table must really be partitioned, with the
+          -- seeded monthly partitions plus the default one present.
+          SELECT CASE WHEN count(*) < 5
+                      THEN 1/0
+                      ELSE 1 END
+          FROM pg_class c
+          JOIN pg_inherits i ON i.inhrelid = c.oid
+          JOIN pg_class p ON p.oid = i.inhparent
+          WHERE p.relname = 'traffic_records';
+
+          -- The flow constraint must reject a combination Xray does not accept.
+          DO $$
+          BEGIN
+              INSERT INTO inbounds (tag, protocol, transport, security, listen_port, flow)
+              VALUES ('bad-flow', 'vless', 'ws', 'tls', 8443, 'xtls-rprx-vision');
+              RAISE EXCEPTION 'flow constraint did not reject vless over ws';
+          EXCEPTION
+              WHEN check_violation THEN NULL;
+          END
+          $$;
+          SQL
