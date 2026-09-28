@@ -71,7 +71,7 @@ node-image: ## Build the node image (agent as PID 1, xray as its child)
 
 # The production images. deploy/docker-compose.yml expects them under IMAGE_REGISTRY with
 # the XRAYPANEL_VERSION tag; releases are built and pushed by .github/workflows/release.yml.
-IMAGE_REGISTRY ?= ghcr.io/xraypanel
+IMAGE_REGISTRY ?= ghcr.io/prozorovski322
 
 .PHONY: images
 images: ## Build the panel, web and backup images for deploy/docker-compose.yml

@@ -15,7 +15,7 @@
 
 name: xraypanel
 
-x-panel-image: &panel-image ${IMAGE_REGISTRY:-ghcr.io/xraypanel}/panel:${XRAYPANEL_VERSION:-latest}
+x-panel-image: &panel-image ${IMAGE_REGISTRY:-ghcr.io/prozorovski322}/panel:${XRAYPANEL_VERSION:-latest}
 
 x-database-url: &database-url postgres://panel:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/panel?sslmode=disable
 
@@ -88,7 +88,7 @@ services:
         max-file: "5"
 
   web:
-    image: ${IMAGE_REGISTRY:-ghcr.io/xraypanel}/web:${XRAYPANEL_VERSION:-latest}
+    image: ${IMAGE_REGISTRY:-ghcr.io/prozorovski322}/web:${XRAYPANEL_VERSION:-latest}
     restart: unless-stopped
     environment:
       PANEL_DOMAIN: ${PANEL_DOMAIN:?set PANEL_DOMAIN in .env}
@@ -108,7 +108,7 @@ services:
     logging: *logging
 
   backup:
-    image: ${IMAGE_REGISTRY:-ghcr.io/xraypanel}/backup:${XRAYPANEL_VERSION:-latest}
+    image: ${IMAGE_REGISTRY:-ghcr.io/prozorovski322}/backup:${XRAYPANEL_VERSION:-latest}
     restart: unless-stopped
     environment:
       DATABASE_URL: *database-url

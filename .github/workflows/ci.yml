@@ -124,9 +124,11 @@ jobs:
 
       # Pinned here rather than in the Makefile: the config schema differs between
       # v1 and v2, so the version that reads .golangci.yml is fixed in one place.
-      - uses: golangci/golangci-lint-action@v6
+      # The linter binary must be built with a Go at least as new as go.mod's, or it
+      # refuses to load the module at all.
+      - uses: golangci/golangci-lint-action@v9
         with:
-          version: v1.64.8
+          version: v2.14.0
 
   frontend:
     name: admin UI builds
@@ -296,7 +298,7 @@ jobs:
           for image in panel web backup; do
             docker build -f "deploy/${image}.Dockerfile" \
               --build-arg VERSION=${GITHUB_SHA::7} --build-arg COMMIT=${GITHUB_SHA} \
-              -t "ghcr.io/xraypanel/${image}:${XRAYPANEL_VERSION}" .
+              -t "ghcr.io/prozorovski322/${image}:${XRAYPANEL_VERSION}" .
           done
 
       - name: Start the stack
@@ -360,8 +362,10 @@ jobs:
             if docker compose exec -T backup backup health; then break; fi
             sleep 2
           done
+          # That one predates the smoke test's writes, so take another now: it is the
+          # one that has to hold them.
+          file=$(docker compose exec -T backup backup once)
           docker compose exec -T backup backup list
-          file=$(docker compose exec -T backup backup list | awk 'NR==2 {print $1}')
           docker compose exec -T backup backup verify "$file"
           docker compose exec -T backup backup restore "$file" panel_restored
 
@@ -470,14 +474,23 @@ jobs:
         run: |
           PGPASSWORD=panel psql -h localhost -U panel -d panel -v ON_ERROR_STOP=1 <<'SQL'
           -- The partitioned traffic table must really be partitioned, with the
-          -- seeded monthly partitions plus the default one present.
-          SELECT CASE WHEN count(*) < 5
-                      THEN 1/0
-                      ELSE 1 END
-          FROM pg_class c
-          JOIN pg_inherits i ON i.inhrelid = c.oid
-          JOIN pg_class p ON p.oid = i.inhparent
-          WHERE p.relname = 'traffic_records';
+          -- seeded monthly partitions plus the default one present. Raised from
+          -- PL/pgSQL: a 1/0 in a CASE arm is constant-folded at plan time and fails
+          -- whatever the count.
+          DO $$
+          DECLARE
+              partitions int;
+          BEGIN
+              SELECT count(*) INTO partitions
+              FROM pg_class c
+              JOIN pg_inherits i ON i.inhrelid = c.oid
+              JOIN pg_class p ON p.oid = i.inhparent
+              WHERE p.relname = 'traffic_records';
+              IF partitions < 5 THEN
+                  RAISE EXCEPTION 'traffic_records has % partitions, expected at least 5', partitions;
+              END IF;
+          END
+          $$;
 
           -- The flow constraint must reject a combination Xray does not accept.
           DO $$

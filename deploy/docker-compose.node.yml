@@ -9,7 +9,7 @@ name: xraypanel-node
 
 services:
   node:
-    image: ghcr.io/xraypanel/node:latest
+    image: ghcr.io/prozorovski322/node:latest
     restart: unless-stopped
 
     # The agent is PID 1 and xray is its child, so the container has exactly one thing to

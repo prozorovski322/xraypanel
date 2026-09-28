@@ -1,17 +1,19 @@
-# golangci-lint configuration (v1 schema; the version is pinned in CI).
+# golangci-lint configuration (v2 schema; the version is pinned in CI).
 #
 # Deliberately small. A large linter config becomes its own maintenance surface,
 # and the linters that catch real defects here are a short list: the ones that find
 # ignored errors, dropped contexts, and unclosed rows.
+
+version: "2"
 
 run:
   timeout: 5m
   tests: true
 
 linters:
+  # The v2 "standard" set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
   enable:
-    - gofmt
-    - goimports
     - errorlint      # errors compared with == instead of errors.Is
     - bodyclose      # leaked HTTP response bodies
     - rowserrcheck   # rows.Err() unchecked, which silently truncates a result set
@@ -27,31 +29,53 @@ linters:
     - usestdlibvars
     - wastedassign
 
-linters-settings:
-  goimports:
-    local-prefixes: github.com/xraypanel/panel
-  gosec:
-    excludes:
-      # Weak-RNG detection. Every random value in this codebase comes from
-      # crypto/rand, and the check misfires on call sites that only look similar.
-      - G404
-  revive:
+  settings:
+    gosec:
+      excludes:
+        # Weak-RNG detection. Every random value in this codebase comes from
+        # crypto/rand, and the check misfires on call sites that only look similar.
+        - G404
+    revive:
+      rules:
+        # Doc comments are enforced by review, not by a linter that fires on every
+        # unexported helper.
+        - name: exported
+          disabled: true
+    misspell:
+      locale: US
+    staticcheck:
+      # v2 folds stylecheck and the quickfix suggestions into staticcheck. Keep the scope
+      # v1 had: the correctness (SA) and simplification (S) checks, not style.
+      checks:
+        - all
+        - -ST*
+        - -QF*
+
+  exclusions:
+    # The exclusions v1 applied by default.
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
     rules:
-      # Doc comments are enforced by review, not by a linter that fires on every
-      # unexported helper.
-      - name: exported
-        disabled: true
-  misspell:
-    locale: US
+      # Tests legitimately ignore errors in helpers and build long table literals;
+      # security linting them adds noise without adding safety.
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/xraypanel/panel
 
 issues:
   # Report everything, not just the first few of each kind.
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Tests legitimately ignore errors in helpers and build long table literals;
-    # security linting them adds noise without adding safety.
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck

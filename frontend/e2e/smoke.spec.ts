@@ -96,7 +96,8 @@ test("sign in with 2FA, create a user, copy the link, delete the user", async ({
   await expect(page.getByText("0 B of 10.0 GiB")).toBeVisible();
 
   // --- copy the subscription link
-  const link = await page.getByLabel("Subscription link").inputValue();
+  // exact: the copy button's "Copy subscription link" label would otherwise match too.
+  const link = await page.getByLabel("Subscription link", { exact: true }).inputValue();
   expect(link).toMatch(/\/sub\/[A-Za-z0-9]+$/);
 
   await page.getByTestId("copy-subscription").click();
