@@ -260,8 +260,8 @@ func (s *Supervisor) Apply(ctx context.Context, configJSON []byte) error {
 			return fmt.Errorf("supervisor: %w (and the rollback failed: %v)", startErr, err) //nolint:errorlint // see above
 		}
 		if err := s.restart(ctx, previous); err != nil {
-			return fmt.Errorf("supervisor: %w (and the previous configuration would not restart either: %v)", //nolint:errorlint // see above
-				startErr, err)
+			return fmt.Errorf("supervisor: %w (and the previous configuration would not restart either: %v)",
+				startErr, err) //nolint:errorlint // see above
 		}
 		return fmt.Errorf("supervisor: rolled back to the previous configuration: %w", startErr)
 	}
