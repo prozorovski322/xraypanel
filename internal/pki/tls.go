@@ -110,8 +110,11 @@ func EnrollTLSConfig(pin string) (*tls.Config, error) {
 		// this pin", so it is turned off and replaced below. InsecureSkipVerify here
 		// does not mean unverified: VerifyPeerCertificate is called for every
 		// handshake and rejects anything that does not chain to the pinned key.
-		InsecureSkipVerify:    true,
+		InsecureSkipVerify:    true, //nolint:gosec // replaced by the pinned check below
 		VerifyPeerCertificate: verifyPinnedChain(normalized, time.Now),
+		// A resumed session skips VerifyPeerCertificate. There is no session cache here
+		// anyway; this states it, so the pinned check can never be bypassed.
+		SessionTicketsDisabled: true,
 	}, nil
 }
 

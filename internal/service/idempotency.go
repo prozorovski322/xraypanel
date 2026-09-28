@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -71,7 +70,7 @@ func (s *Service) Idempotent(
 		return StoredResponse{}, err
 	}
 
-	statusCode := int32(response.StatusCode)
+	statusCode := int32(response.StatusCode) //nolint:gosec // an HTTP status, three digits
 	if err := s.q.CompleteIdempotencyKey(ctx, dbgen.CompleteIdempotencyKeyParams{
 		Key:         key,
 		Response:    response.Body,
@@ -150,12 +149,3 @@ type RenewUserInput struct {
 
 // ptr returns a pointer to a value, for the generated params that take one.
 func ptr[T any](v T) *T { return &v }
-
-// marshalResponse encodes a value for storage against an idempotency key.
-func marshalResponse(value any) ([]byte, error) {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return nil, fmt.Errorf("service: encode idempotent response: %w", err)
-	}
-	return encoded, nil
-}

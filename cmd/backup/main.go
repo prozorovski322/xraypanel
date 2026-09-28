@@ -159,7 +159,7 @@ func run() error {
 
 // resolve accepts either a bare file name in the backup directory or a path.
 func resolve(dir, name string) string {
-	if _, err := os.Stat(name); err == nil {
+	if _, err := os.Stat(name); err == nil { //nolint:gosec // the operator's own argument; any path is allowed
 		return name
 	}
 	return filepath.Join(dir, name)

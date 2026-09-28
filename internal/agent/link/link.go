@@ -477,7 +477,7 @@ func (a *Agent) applyConfig(
 	}
 
 	var applyErr error
-	restarted := false
+	var restarted bool
 
 	if len(payload) == 0 {
 		// The panel wants nothing running. A node with no inbounds, or none with active

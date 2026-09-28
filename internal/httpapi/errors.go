@@ -28,7 +28,7 @@ type ErrorBody struct {
 
 // Error codes returned to clients.
 const (
-	codeInvalidCredentials = "invalid_credentials"
+	codeInvalidCredentials = "invalid_credentials" //nolint:gosec // an error code, not a credential
 	codeInvalidCode        = "invalid_code"
 	codeInvalidToken       = "invalid_token"
 	codeTooManyAttempts    = "too_many_attempts"

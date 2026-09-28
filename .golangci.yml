@@ -41,8 +41,9 @@ linters:
         # unexported helper.
         - name: exported
           disabled: true
-    misspell:
-      locale: US
+    # No locale: the code and its comments are written in British English, and the
+    # point is to catch misspellings, not to convert one spelling to the other.
+    misspell: {}
     staticcheck:
       # v2 folds stylecheck and the quickfix suggestions into staticcheck. Keep the scope
       # v1 had: the correctness (SA) and simplification (S) checks, not style.
@@ -60,11 +61,13 @@ linters:
       - std-error-handling
     rules:
       # Tests legitimately ignore errors in helpers and build long table literals;
-      # security linting them adds noise without adding safety.
+      # security linting them adds noise without adding safety. The same goes for
+      # threading a context through every exec, dial and test request.
       - path: _test\.go
         linters:
           - gosec
           - errcheck
+          - noctx
 
 formatters:
   enable:

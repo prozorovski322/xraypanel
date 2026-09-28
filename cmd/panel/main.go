@@ -260,7 +260,8 @@ func serve(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 		return err
 	}
 
-	grpcListener, err := net.Listen("tcp", cfg.GRPC.Addr)
+	var listenConfig net.ListenConfig
+	grpcListener, err := listenConfig.Listen(ctx, "tcp", cfg.GRPC.Addr)
 	if err != nil {
 		return fmt.Errorf("listen for nodes on %s: %w", cfg.GRPC.Addr, err)
 	}

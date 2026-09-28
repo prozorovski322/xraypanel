@@ -210,7 +210,7 @@ func (s *Supervisor) Version(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	output, err := exec.CommandContext(ctx, s.cfg.Binary, "version").CombinedOutput()
+	output, err := exec.CommandContext(ctx, s.cfg.Binary, "version").CombinedOutput() //nolint:gosec // the operator's configured xray binary
 	if err != nil {
 		s.log.WarnContext(ctx, "could not read the xray version",
 			slog.String("binary", s.cfg.Binary), slog.Any("error", err))
@@ -255,11 +255,12 @@ func (s *Supervisor) Apply(ctx context.Context, configJSON []byte) error {
 		s.log.ErrorContext(ctx, "the new configuration would not start; rolling back",
 			slog.Any("error", startErr))
 
+		// Only startErr is wrapped: it is the cause, and the rollback failure is context.
 		if err := writeFileAtomic(s.cfg.ConfigPath, previous); err != nil {
-			return fmt.Errorf("supervisor: %w (and the rollback failed: %v)", startErr, err)
+			return fmt.Errorf("supervisor: %w (and the rollback failed: %v)", startErr, err) //nolint:errorlint // see above
 		}
 		if err := s.restart(ctx, previous); err != nil {
-			return fmt.Errorf("supervisor: %w (and the previous configuration would not restart either: %v)",
+			return fmt.Errorf("supervisor: %w (and the previous configuration would not restart either: %v)", //nolint:errorlint // see above
 				startErr, err)
 		}
 		return fmt.Errorf("supervisor: rolled back to the previous configuration: %w", startErr)
@@ -341,7 +342,7 @@ func (s *Supervisor) restart(ctx context.Context, configJSON []byte) error {
 
 // start launches the core and waits until it is actually serving.
 func (s *Supervisor) start(ctx context.Context, configJSON []byte) error {
-	cmd := exec.Command(s.cfg.Binary, "run", "-config", s.cfg.ConfigPath)
+	cmd := exec.Command(s.cfg.Binary, "run", "-config", s.cfg.ConfigPath) //nolint:gosec,noctx // the configured binary; outlives ctx, stopped by the supervisor
 
 	// Inherited rather than captured: the agent is PID 1 in the container, so the
 	// core's own log belongs in the container's log where an operator already looks.
@@ -479,7 +480,8 @@ func (s *Supervisor) waitReady(ctx context.Context, configJSON []byte) error {
 			return fmt.Errorf("supervisor: xray exited while starting: %s", s.State().LastError)
 		}
 
-		conn, err := net.DialTimeout("tcp", endpoint, 500*time.Millisecond)
+		dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+		conn, err := dialer.DialContext(ctx, "tcp", endpoint)
 		if err == nil {
 			_ = conn.Close()
 			return nil
@@ -522,7 +524,7 @@ func (s *Supervisor) validate(ctx context.Context, configJSON []byte) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultValidateBudget)
 	defer cancel()
 
-	output, err := exec.CommandContext(ctx, s.cfg.Binary, "run", "-test", "-config", path).CombinedOutput()
+	output, err := exec.CommandContext(ctx, s.cfg.Binary, "run", "-test", "-config", path).CombinedOutput() //nolint:gosec // the operator's configured xray binary
 	if err != nil {
 		return fmt.Errorf("supervisor: xray rejected the configuration: %w: %s",
 			err, strings.TrimSpace(string(output)))

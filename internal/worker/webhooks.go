@@ -142,7 +142,7 @@ func (w *Webhooks) Once(ctx context.Context) (int, error) {
 	// worker that dies mid-delivery therefore leaves rows that come due again on their own,
 	// with the attempt counted — rather than rows retried for ever, or rows lost.
 	claimed, err := w.q.ClaimWebhookDeliveries(ctx, dbgen.ClaimWebhookDeliveriesParams{
-		MaxAttempts: int32(w.cfg.MaxAttempts),
+		MaxAttempts: int32(w.cfg.MaxAttempts), //nolint:gosec // config bounds it to 1..50
 		Now:         now,
 		MaxRows:     webhookBatch,
 		RetryAt:     now.Add(webhookBatch*w.cfg.Timeout + time.Minute),

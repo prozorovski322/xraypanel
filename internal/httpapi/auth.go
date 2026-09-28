@@ -460,7 +460,9 @@ func (h *authHandler) writeLoginResult(w http.ResponseWriter, r *http.Request, r
 }
 
 func (h *authHandler) setRefreshCookie(w http.ResponseWriter, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{
+	// Secure is configured rather than constant so that local development over plain
+	// HTTP still works.
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // see above
 		Name:  refreshCookieName,
 		Value: token,
 		Path:  refreshCookiePath,
@@ -478,7 +480,7 @@ func (h *authHandler) setRefreshCookie(w http.ResponseWriter, token string, expi
 }
 
 func (h *authHandler) clearRefreshCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure is configured, see setRefreshCookie
 		Name:     refreshCookieName,
 		Value:    "",
 		Path:     refreshCookiePath,

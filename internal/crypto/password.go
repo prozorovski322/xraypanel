@@ -112,7 +112,7 @@ func VerifyPassword(password, encoded string) (match, needsRehash bool, err erro
 		stored.Iterations,
 		stored.Memory,
 		stored.Parallelism,
-		uint32(len(key)),
+		uint32(len(key)), //nolint:gosec // decoded from a stored hash string, nowhere near 4 GiB
 	)
 
 	if subtle.ConstantTimeCompare(key, computed) != 1 {
@@ -185,8 +185,8 @@ func decodeHash(encoded string) (params Argon2Params, salt, key []byte, err erro
 		Memory:      memory,
 		Iterations:  iterations,
 		Parallelism: parallelism,
-		SaltLength:  uint32(len(salt)),
-		KeyLength:   uint32(len(key)),
+		SaltLength:  uint32(len(salt)), //nolint:gosec // decoded from a stored hash string
+		KeyLength:   uint32(len(key)),  //nolint:gosec // likewise
 	}, salt, key, nil
 }
 

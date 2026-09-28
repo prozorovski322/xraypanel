@@ -202,7 +202,7 @@ func (s *TokenSigner) parse(raw string, claims jwt.Claims, key []byte, audience 
 		// The underlying reason is wrapped for the log but collapsed into one
 		// sentinel, so a handler cannot accidentally tell a caller which check
 		// failed.
-		return fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return fmt.Errorf("%w: %v", ErrInvalidToken, err) //nolint:errorlint // collapsed on purpose, see above
 	}
 	return nil
 }

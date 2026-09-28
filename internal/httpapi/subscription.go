@@ -121,7 +121,7 @@ func (h *subscriptionHandler) serve(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) //nolint:gosec // a client profile served with its own content type, not HTML
 
 	// Recorded only for a fetch that delivered a profile, so that "last fetched" means
 	// what an operator reads it as.

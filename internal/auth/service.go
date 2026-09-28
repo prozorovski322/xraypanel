@@ -16,7 +16,7 @@ import (
 )
 
 // Encryption purposes for secrets this package stores.
-const totpSecretPurpose = "admin.totp_secret"
+const totpSecretPurpose = "admin.totp_secret" //nolint:gosec // a label, not a secret
 
 // ipFailureMultiplier loosens the per-IP threshold relative to the per-username
 // one. A single address can legitimately carry several administrators behind NAT,
